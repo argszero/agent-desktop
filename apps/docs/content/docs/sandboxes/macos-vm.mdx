@@ -4,7 +4,7 @@ navTitle: macOS VM
 description: Install the macOS VM provider, create a macOS guest, complete the one-time setup by hand, and clone the configured VM for later sandboxes.
 ---
 
-The `macos-vm` provider runs a macOS guest in a virtual machine on an Apple Silicon Mac. Only the first sandbox needs a person at the guest desktop; every sandbox you clone from it starts headless and comes up already set up.
+The `macos-vm` provider runs a macOS guest in a virtual machine on an Apple Silicon Mac. Only the first sandbox needs a person at the guest desktop; every sandbox you clone from it starts headless and comes up already set up. Cloning a set-up VM has been tested end to end. Creating the first VM from a macOS image is experimental.
 
 ## Requirements
 
@@ -22,18 +22,24 @@ The command compiles `vmhost.swift`, signs the binary with the virtualization en
 
 ## Create the first VM
 
+<Callout title="Creating the first VM is experimental">
+The provider implements the download, checksum, and install, but no install has been verified end to end. Treat these steps as experimental.
+</Callout>
+
 ```bash
 agent-desktop sandbox create base --provider macos-vm  # download and install macOS
 agent-desktop sandbox status base                      # repeat until the state changes
 ```
 
-`create` answers `working` and installs in the background: it reads Apple's macOS install catalog, takes the newest version, downloads that image, checks it against the published SHA-1, and installs it into the sandbox. `status` reports the latest progress until the install finishes, then reports the VM.
+`create` answers `working` and installs in the background: it reads Apple's macOS install catalog, takes the newest version, downloads that image, checks it against the published SHA-1, and installs it into the sandbox. `status` reports the latest progress recorded for the install.
 
 To install an image you already have, pass its path. This skips the download.
 
 ```bash
 agent-desktop sandbox create base --provider macos-vm --set ipsw=/path/to/UniversalMac_15.0.ipsw
 ```
+
+On a fresh install, `--set user=<name>` sets the guest account name recorded for SSH. The default is your user name on the host.
 
 ## Complete the guest setup
 
@@ -53,7 +59,7 @@ agent-desktop sandbox create work --provider macos-vm  # copy the newest set-up 
 agent-desktop sandbox start work                       # start it headless
 ```
 
-A clone copies the disk image, the sandbox key, and the setup record, so it starts without a window. Pass `--set from=base` to clone a named sandbox instead of the newest one. Pass `--set user=<name>` to set the guest user name recorded for SSH; the default is your user name on the host.
+A clone copies the disk image, the sandbox key, the setup record, and the guest user name, so it starts without a window and SSH reaches the same account. Pass `--set from=base` to clone a named sandbox instead of the newest one. `--set user` applies only to a fresh install; a clone keeps the source's user name even when you pass the flag.
 
 ## Limits
 

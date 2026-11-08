@@ -23,11 +23,12 @@ FAKE_LOG=$tmp/calls
 FAKE_HV_SUPPORT=1
 FAKE_SWIFTC_FOUND=1
 FAKE_GUEST_SHA1=2222222222222222222222222222222222222222
+FAKE_EXEC_BUDGET=300
 FAKE_PS_COMM=/opt/agent-desktop/build/vmhost
 FAKE_PS_BUNDLE=$AD_SANDBOX_DIR/vm
 FAKE_PS_COMMAND=
 export AD_SANDBOX_DIR AD_PROVIDER_DIR AD_BINARY VMHOST FAKE_LOG
-export FAKE_HV_SUPPORT FAKE_SWIFTC_FOUND FAKE_GUEST_SHA1
+export FAKE_HV_SUPPORT FAKE_SWIFTC_FOUND FAKE_GUEST_SHA1 FAKE_EXEC_BUDGET
 export FAKE_PS_BUNDLE FAKE_PS_COMM FAKE_PS_COMMAND
 
 printf '#!/bin/sh\n' > "$AD_PROVIDER_DIR/guest-setup.sh"
@@ -109,7 +110,47 @@ set -eu
   printf 'END\n'
 } >> "$FAKE_LOG"
 remote=
-for arg in "$@"; do remote=$arg; done
+batch=
+connect_timeout=
+alive_interval=
+alive_count=
+for arg in "$@"; do
+  remote=$arg
+  case $arg in
+    BatchMode=yes) batch=1 ;;
+    ConnectTimeout=*) connect_timeout=${arg#*=} ;;
+    ServerAliveInterval=*) alive_interval=${arg#*=} ;;
+    ServerAliveCountMax=*) alive_count=${arg#*=} ;;
+  esac
+done
+if [ -z "$batch" ]; then sleep 40; exit 255; fi
+case ${FAKE_SSH_BEHAVIOR:-echo} in
+  unreachable)
+    if [ -z "$connect_timeout" ]; then sleep 40; fi
+    exit 255
+    ;;
+  silent)
+    if [ -z "$alive_interval" ] || [ -z "$alive_count" ]; then sleep 40; exit 255; fi
+    sleep "$((alive_interval * alive_count))"
+    exit 255
+    ;;
+  quiet)
+    cutoff=0
+    if [ -n "$alive_interval" ] && [ -n "$alive_count" ]; then
+      cutoff=$((alive_interval * alive_count))
+    fi
+    case $remote in
+      *'shasum -a 1'*|*'mkdir -p'*|*'chmod 755'*) ;;
+      *)
+        if [ "$cutoff" -gt 0 ] && [ "$cutoff" -lt "${FAKE_EXEC_BUDGET:-300}" ]; then
+          exit 255
+        fi
+        printf 'guest output\n'
+        exit 0
+        ;;
+    esac
+    ;;
+esac
 case $remote in
   *'shasum -a 1'*) printf '%s  agent-desktop\n' "${FAKE_GUEST_SHA1:-}" ;;
   *) printf '{"ok":true,"command":"guest"}\n' ;;
@@ -117,11 +158,24 @@ esac
 FAKE
 cat > "$tmp/bin/scp" <<'FAKE'
 #!/bin/sh
+set -eu
 {
   printf 'BEGIN scp\n'
   for arg in "$@"; do printf '%s\n' "$arg"; done
   printf 'END\n'
 } >> "$FAKE_LOG"
+batch=
+connect_timeout=
+for arg in "$@"; do
+  case $arg in
+    BatchMode=yes) batch=1 ;;
+    ConnectTimeout=*) connect_timeout=${arg#*=} ;;
+  esac
+done
+if [ -z "$batch" ] || [ -z "$connect_timeout" ]; then
+  sleep 40
+  exit 1
+fi
 FAKE
 cat > "$tmp/bin/ps" <<'FAKE'
 #!/bin/sh
@@ -210,7 +264,10 @@ printf 'source public key\n' > "$source_dir/id_ed25519.pub"
 printf 'source hosts\n' > "$source_dir/known_hosts"
 printf 'guest\n' > "$source_dir/guest_user"
 : > "$FAKE_LOG"
+AD_SET_USER=requested
+export AD_SET_USER
 run_ok_with AD_SET_FROM source create demo
+unset AD_SET_USER
 python3 - "$tmp/out" "$FAKE_LOG" "$source_dir" "$AD_SANDBOX_DIR" <<'PY'
 import json
 import pathlib
@@ -222,7 +279,7 @@ assert (
     and "BEGIN curl" not in log.read_text().splitlines()
     and "clone" in log.read_text().splitlines()
     and all((target / name).read_bytes() == (source / name).read_bytes()
-            for name in ("id_ed25519", "known_hosts", "setup_done"))
+            for name in ("id_ed25519", "known_hosts", "setup_done", "guest_user"))
 ), "create did not clone a set-up stopped source without downloading"
 PY
 
@@ -364,6 +421,39 @@ PY
 kill "$vm_pid" 2>/dev/null || true
 wait "$vm_pid" 2>/dev/null || true
 vm_pid=
+
+sleep 30 &
+vm_pid=$!
+printf '%s\n' "$vm_pid" > "$AD_SANDBOX_DIR/vm/vmhost.pid"
+FAKE_PS_COMMAND="/opt/agent-desktop/build/vmhost run $AD_SANDBOX_DIR/vm"
+rm -f "$AD_SANDBOX_DIR/setup_done"
+probe_started=$(date +%s)
+run_ok_with FAKE_SSH_BEHAVIOR silent status demo
+probe_elapsed=$(( $(date +%s) - probe_started ))
+assert_field "$tmp/out" state needs_setup 'status against a connected but silent guest'
+[ "$probe_elapsed" -lt 25 ] || \
+  fail "status blocked ${probe_elapsed}s on a silent guest instead of reporting a state inside the 30s status budget"
+
+probe_started=$(date +%s)
+run_ok_with FAKE_SSH_BEHAVIOR unreachable status demo
+probe_elapsed=$(( $(date +%s) - probe_started ))
+assert_field "$tmp/out" state needs_setup 'status against an unreachable guest'
+[ "$probe_elapsed" -lt 25 ] || \
+  fail "status blocked ${probe_elapsed}s on an unreachable guest instead of using a bounded connect timeout"
+
+: > "$AD_SANDBOX_DIR/setup_done"
+FAKE_SCP_BEHAVIOR=prompt
+export FAKE_SCP_BEHAVIOR
+run_ok_with FAKE_SSH_BEHAVIOR quiet exec demo -- snapshot
+unset FAKE_SCP_BEHAVIOR
+grep -qx 'guest output' "$tmp/out" || \
+  fail "exec did not carry a quiet remote command past the status probe bound: $(cat "$tmp/out" "$tmp/err")"
+
+kill "$vm_pid" 2>/dev/null || true
+wait "$vm_pid" 2>/dev/null || true
+vm_pid=
+FAKE_PS_COMMAND=
+rm -f "$AD_SANDBOX_DIR/setup_done"
 
 printf '999999999\n' > "$AD_SANDBOX_DIR/vm/vmhost.pid"
 status=0

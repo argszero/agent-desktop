@@ -511,11 +511,18 @@ guest_user() {
 
 guest_transport() {
   transport_tool=$1
-  shift
+  transport_budget=$2
+  shift 2
+  if [ "$transport_budget" = probe ]; then
+    set -- -o ServerAliveInterval=3 -o ServerAliveCountMax=3 "$@"
+  fi
   "$transport_tool" -i "$AD_SANDBOX_DIR/id_ed25519" \
     -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$AD_SANDBOX_DIR/known_hosts" \
+    -o BatchMode=yes \
+    -o ConnectTimeout=5 \
+    -o ConnectionAttempts=1 \
     "$@"
 }
 
@@ -555,7 +562,7 @@ check_guest_setup() {
   fi
   target=$user@$ip
   probe_status=0
-  permissions=$(guest_transport ssh "$target" 'if [ ! -x ~/.local/bin/agent-desktop ]; then exit 3; fi; ~/.local/bin/agent-desktop permissions' 2>/dev/null) || probe_status=$?
+  permissions=$(guest_transport ssh probe "$target" 'if [ ! -x ~/.local/bin/agent-desktop ]; then exit 3; fi; ~/.local/bin/agent-desktop permissions' 2>/dev/null) || probe_status=$?
   if [ "$probe_status" -eq 255 ]; then
     guest_not_answering "$name"
     return 0
@@ -808,13 +815,13 @@ do_exec() {
   fi
   host_hash=$(printf '%s\n' "$host_hash_line" | awk '{ print tolower($1) }')
   target=$user@$ip
-  guest_hash_line=$(guest_transport ssh "$target" 'shasum -a 1 ~/.local/bin/agent-desktop' 2>/dev/null || true)
+  guest_hash_line=$(guest_transport ssh probe "$target" 'shasum -a 1 ~/.local/bin/agent-desktop' 2>/dev/null || true)
   guest_hash=$(printf '%s\n' "$guest_hash_line" | awk '{ print tolower($1) }')
   if [ "$host_hash" != "$guest_hash" ]; then
     staged_binary='~/.local/bin/agent-desktop.new'
-    if ! guest_transport ssh "$target" 'mkdir -p ~/.local/bin' >/dev/null || \
-      ! guest_transport scp "$AD_BINARY" "$target:$staged_binary" >/dev/null || \
-      ! guest_transport ssh "$target" "chmod 755 $staged_binary && mv -f $staged_binary ~/.local/bin/agent-desktop" >/dev/null; then
+    if ! guest_transport ssh probe "$target" 'mkdir -p ~/.local/bin' >/dev/null || \
+      ! guest_transport scp long "$AD_BINARY" "$target:$staged_binary" >/dev/null || \
+      ! guest_transport ssh probe "$target" "chmod 755 $staged_binary && mv -f $staged_binary ~/.local/bin/agent-desktop" >/dev/null; then
       exec_failure "agent-desktop could not be copied into sandbox $name." "Run agent-desktop sandbox status $name."
     fi
   fi
@@ -823,7 +830,7 @@ do_exec() {
     remote_command="$remote_command $(shell_quote "$argument")"
   done
   ssh_status=0
-  guest_transport ssh "$target" "$remote_command" || ssh_status=$?
+  guest_transport ssh long "$target" "$remote_command" || ssh_status=$?
   if [ "$ssh_status" -eq 255 ]; then
     exec_failure "Remote Login could not be reached in sandbox $name." "Run agent-desktop sandbox status $name."
   fi
