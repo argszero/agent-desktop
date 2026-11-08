@@ -1,29 +1,38 @@
 use crate::sandbox::sandbox_name::validate_sandbox_name;
 use crate::sandbox::sandbox_record::SandboxRecord;
 use crate::storage::private_file::{read_private_bounded, write_atomic};
-use crate::storage::private_file_ops::temporary_file_name;
 use crate::storage::private_file_parent::ensure_private;
-use crate::{AdapterError, AppError, DeliverySemantics, ErrorCode};
-use std::ffi::OsStr;
+use crate::{
+    AdapterError, AppError, Deadline, DeliverySemantics, ErrorCode, storage::file_lock::FileLock,
+};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 pub(crate) const RECORD_FILE: &str = "sandbox.json";
+const CREATE_LOCK_FILE: &str = ".create.lock";
 const MAX_RECORD_BYTES: u64 = 4096;
 
 pub(crate) fn create(root: &Path, record: &SandboxRecord) -> Result<PathBuf, AppError> {
     validate_sandbox_name(&record.name)?;
     let dir = root.join(&record.name);
     ensure_private(&dir)?;
-    let staging = dir.join(temporary_file_name(OsStr::new(RECORD_FILE)));
-    write_atomic(&staging, &serde_json::to_vec(record)?)?;
-    let published = std::fs::hard_link(&staging, dir.join(RECORD_FILE));
-    let _ = std::fs::remove_file(&staging);
-    match published {
-        Ok(()) => Ok(dir),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            Err(already_exists(&load(root, &record.name)?))
-        }
+    let _lock = FileLock::acquire(
+        &root.join(CREATE_LOCK_FILE),
+        Deadline::standard()?,
+        "sandbox record create",
+    )?;
+    let destination = dir.join(RECORD_FILE);
+    if entry_exists(&destination)? {
+        return Err(already_exists(&load(root, &record.name)?));
+    }
+    write_atomic(&destination, &serde_json::to_vec(record)?)?;
+    Ok(dir)
+}
+
+fn entry_exists(path: &Path) -> Result<bool, AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
 }
