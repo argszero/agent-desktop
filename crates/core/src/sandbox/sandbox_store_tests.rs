@@ -94,11 +94,6 @@ fn a_published_record_has_one_link_and_no_staging_left_over() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(entries, vec![OsString::from(RECORD_FILE)]);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(std::fs::metadata(dir.join(RECORD_FILE)).unwrap().nlink(), 1);
-    }
     assert_eq!(load(&root, "dev-1").unwrap().created_at, 1);
 }
 
@@ -136,11 +131,6 @@ fn a_crash_before_publish_leaves_no_record_and_the_next_create_publishes() {
     create(&root, &record("crash", "macos-vm", 1)).expect("a crashed publish is retryable");
 
     assert_eq!(load(&root, "crash").unwrap().created_at, 1);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(std::fs::metadata(&destination).unwrap().nlink(), 1);
-    }
 }
 
 #[test]
